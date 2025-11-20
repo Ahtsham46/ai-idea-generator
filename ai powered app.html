@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Business Idea Generator (Zero-Cost)</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Inter Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f7fafc; }
+        /* Style for the loading spinner */
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #ffffff;
+            border-radius: 50%;
+            width: 1.5rem;
+            height: 1.5rem;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+
+<div id="app" class="min-h-screen flex flex-col items-center p-4">
+    <div class="w-full max-w-4xl bg-white rounded-xl shadow-2xl p-6 md:p-10 mt-8">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-800">AI Business Idea Generator</h1>
+            <p class="text-gray-500 mt-2 font-medium">Generate high-demand, low-cost startup ideas for any niche.</p>
+            <p class="text-xs text-gray-400 mt-1">User ID: <span id="userIdDisplay" class="font-mono">Loading...</span> | App ID: <span id="appIdDisplay" class="font-mono">Loading...</span></p>
+        </header>
+
+        <!-- Input Area -->
+        <div class="mb-8">
+            <label for="nicheInput" class="block text-sm font-medium text-gray-700 mb-2">
+                Enter Your Niche or Target Audience (e.g., "Remote dog owners", "Freelance photographers")
+            </label>
+            <textarea
+                id="nicheInput"
+                rows="4"
+                class="w-full p-3 border border-gray-300 rounded-lg focus:ring-purple-500 focus:border-purple-500 transition duration-150 ease-in-out resize-none"
+                placeholder="e.g., Small business owners needing social media content."
+            ></textarea>
+            <button
+                id="generateButton"
+                class="w-full mt-4 px-6 py-3 rounded-xl text-white font-semibold transition duration-200 ease-in-out transform hover:scale-[1.01] shadow-lg bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-4 focus:ring-purple-500 focus:ring-opacity-50"
+                onclick="handleGenerateIdeas()"
+            >
+                Generate High-Demand Ideas
+            </button>
+            <div id="errorDisplay" class="mt-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded-lg hidden"></div>
+        </div>
+
+        <!-- Output Area -->
+        <div id="outputArea" class="mb-8 hidden">
+            <h2 class="text-xl font-semibold text-gray-800 mb-3">Startup Concepts</h2>
+            <div id="ideasDisplay" class="p-4 bg-purple-50 border border-purple-200 rounded-lg shadow-inner whitespace-pre-wrap"></div>
+        </div>
+
+        <!-- History Section -->
+        <div id="historySection" class="mt-10 hidden">
+            <h2 class="text-xl font-semibold text-gray-800 mb-4">Recent Niche Ideas (Saved to Firestore)</h2>
+            <div id="historyList" class="space-y-4">
+                <!-- History items will be inserted here -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Firebase and App Logic -->
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, collection, query, limit, getDocs, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // setLogLevel('Debug'); // Uncomment this line to see detailed Firebase logs
+
+    // --- Global Variables and Constants ---
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-ai-app';
+    const apiKey = ""; // Gemini API Key
+
+    let db;
+    let auth;
+    let userId;
+    let isAuthReady = false;
+
+    // --- DOM Elements ---
+    const nicheInput = document.getElementById('nicheInput');
+    const generateButton = document.getElementById('generateButton');
+    const errorDisplay = document.getElementById('errorDisplay');
+    const ideasDisplay = document.getElementById('ideasDisplay');
+    const outputArea = document.getElementById('outputArea');
+    const historySection = document.getElementById('historySection');
+    const historyList = document.getElementById('historyList');
+    const userIdDisplay = document.getElementById('userIdDisplay');
+    const appIdDisplay = document.getElementById('appIdDisplay');
+
+    // --- Utility Functions ---
+
+    function showError(message) {
+        errorDisplay.textContent = message;
+        errorDisplay.classList.remove('hidden');
+    }
+
+    function hideError() {
+        errorDisplay.classList.add('hidden');
+    }
+
+    function setLoading(loading) {
+        generateButton.disabled = loading || !isAuthReady;
+        if (loading) {
+            generateButton.innerHTML = '<div class="flex items-center justify-center"><div class="spinner mr-3"></div> Generating Ideas...</div>';
+            outputArea.classList.add('hidden');
+            ideasDisplay.textContent = '';
+        } else {
+            generateButton.innerHTML = 'Generate High-Demand Ideas';
+        }
+    }
+
+    // Helper function for exponential backoff (for API retries)
+    async function withExponentialBackoff(fn, retries = 5, delay = 1000) {
+        for (let i = 0; i < retries; i++) {
+            try {
+                return await fn();
+            } catch (error) {
+                if (i === retries - 1) throw error;
+                console.warn(`Attempt ${i + 1} failed. Retrying in ${delay / 1000}s...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                delay *= 2;
+            }
+        }
+    }
+
+    // --- Firestore Functions ---
+
+    function getHistoryCollectionRef() {
+        if (db && userId) {
+            return collection(db, 'artifacts', appId, 'users', userId, 'ideas');
+        }
+        return null;
+    }
+
+    async function fetchHistory() {
+        const historyRef = getHistoryCollectionRef();
+        if (!isAuthReady || !historyRef) return;
+        
+        try {
+            const q = query(historyRef, limit(5)); 
+            const querySnapshot = await getDocs(q);
+            const loadedHistory = querySnapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            })).sort((a, b) => b.timestamp - a.timestamp); // Sort by newest first
+
+            historyList.innerHTML = ''; // Clear existing list
+            
+            if (loadedHistory.length > 0) {
+                historySection.classList.remove('hidden');
+                loadedHistory.forEach((item, index) => {
+                    const details = document.createElement('details');
+                    details.className = "bg-white border border-gray-200 rounded-lg shadow-sm p-4 cursor-pointer hover:bg-gray-50 transition duration-150";
+                    
+                    const summary = document.createElement('summary');
+                    summary.className = "font-medium text-gray-700 flex justify-between items-center";
+                    summary.innerHTML = `
+                        Ideas for "${item.niche.substring(0, 50)}${item.niche.length > 50 ? '...' : ''}"
+                        <span class="text-sm text-gray-500">
+                            ${new Date(item.timestamp).toLocaleDateString()}
+                        </span>
+                    `;
+
+                    const contentDiv = document.createElement('div');
+                    contentDiv.className = "mt-3 text-sm text-gray-600";
+                    contentDiv.innerHTML = `
+                        <h4 class="font-semibold mt-2">Generated Output Snippet:</h4>
+                        <p class="italic border-l-2 border-gray-300 pl-2 max-h-20 overflow-hidden">
+                            ${item.generatedIdeas.substring(0, 150)}...
+                        </p>
+                        <h4 class="font-semibold mt-3">Full Idea:</h4>
+                        <pre class="whitespace-pre-wrap p-2 text-xs bg-gray-100 rounded-md">${item.generatedIdeas}</pre>
+                    `;
+                    
+                    details.appendChild(summary);
+                    details.appendChild(contentDiv);
+                    historyList.appendChild(details);
+                });
+            } else {
+                historySection.classList.add('hidden');
+            }
+
+        } catch (e) {
+            console.error("Error fetching history:", e);
+        }
+    }
+
+    // --- Main Logic ---
+
+    window.handleGenerateIdeas = async () => {
+        const niche = nicheInput.value.trim();
+        if (!niche) {
+            showError("Please enter a niche or audience to generate ideas.");
+            return;
+        }
+        if (!isAuthReady) {
+            showError("Authentication not ready. Please wait a moment.");
+            return;
+        }
+
+        hideError();
+        setLoading(true);
+
+        const userPrompt = `Generate 3 high-demand, low-startup-cost online product or service ideas for the niche: "${niche}". 
+        For each idea, provide:
+        1. A compelling Product Name.
+        2. A concise One-sentence Description.
+        3. A suggested Target Audience.
+        4. Three effective Marketing Angle bullet points.
+        Present the ideas clearly and professionally. Use Markdown formatting.`;
+        
+        const payload = {
+            contents: [{ parts: [{ text: userPrompt }] }],
+            tools: [{ "google_search": {} }], 
+            systemInstruction: {
+                parts: [{ text: "You are a world-class business development AI. Your response must be structured, professional, and contain actionable, innovative ideas without any introductory or concluding conversation." }]
+            }
+        };
+
+        try {
+            const result = await withExponentialBackoff(async () => {
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) {
+                    const errorBody = await response.json();
+                    throw new Error(`API call failed: ${response.status} ${response.statusText}. Details: ${errorBody.error?.message || 'No details provided.'}`);
+                }
+
+                return await response.json();
+            });
+
+            const generatedText = result.candidates?.[0]?.content?.parts?.[0]?.text || 'Idea generation failed.';
+            ideasDisplay.textContent = generatedText;
+            outputArea.classList.remove('hidden');
+
+            // --- Save to Firestore ---
+            const historyRef = getHistoryCollectionRef();
+            if (historyRef) {
+                await setDoc(doc(historyRef, crypto.randomUUID()), {
+                    niche: niche,
+                    generatedIdeas: generatedText,
+                    timestamp: Date.now()
+                });
+                fetchHistory(); // Refresh history
+            } else {
+                 console.warn("Firestore history not saved: DB or User ID not available.");
+            }
+
+        } catch (e) {
+            console.error("Gemini API Error:", e);
+            showError(e.message.includes('API call failed') ? e.message : 'An unknown error occurred during idea generation.');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    // --- Initialization ---
+
+    function initializeAppAndAuth() {
+        if (!firebaseConfig) {
+            console.error("Firebase config not available. Running in local mode.");
+            isAuthReady = true;
+            setLoading(false); // Enable button for local use (though saving won't work)
+            return;
+        }
+
+        const app = initializeApp(firebaseConfig);
+        db = getFirestore(app);
+        auth = getAuth(app);
+        
+        appIdDisplay.textContent = appId;
+
+        onAuthStateChanged(auth, async (user) => {
+            if (!user) {
+                try {
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                } catch (e) {
+                    console.error("Error signing in:", e);
+                }
+            }
+            userId = auth.currentUser?.uid || crypto.randomUUID();
+            userIdDisplay.textContent = userId;
+            isAuthReady = true;
+            setLoading(false); // Enable the button
+            fetchHistory();
+        });
+    }
+
+    window.onload = initializeAppAndAuth;
+
+</script>
+
+</body>
+</html>
